@@ -32,6 +32,8 @@ type MailParser interface {
 type mailParser struct {
 	word    *mime.WordDecoder
 	address *mail.AddressParser
+
+	decodeQuotedNames bool
 }
 
 // NewParserOptions specifies options for creating a new mail parser instance.
@@ -39,6 +41,12 @@ type NewParserOptions struct {
 	// WordDecoder is used to decode RFC 2047 encoded-words in headers.
 	// If nil, a default mime.WordDecoder will be used. Can be used to decode other character sets.
 	WordDecoder *mime.WordDecoder
+
+	// DecodeQuotedNames indicates whether to decode faulty formatted encoded names in email addresses.
+	// Sometimes the display names in email addresses are not properly formatted, and this option
+	// allows the parser to attempt to decode them. Defaults to false.
+	// If set to true, it will try to decode names like `"=?UTF-8?Q?Peter_Pahol=C3=ADk?=" <peter.paholik@gmail.com>`.
+	DecodeQuotedNames bool
 }
 
 // NewParser constructs a new mail parser instance with the provided options.
@@ -52,6 +60,8 @@ func NewParser(options *NewParserOptions) MailParser {
 	return mailParser{
 		word:    options.WordDecoder,
 		address: &mail.AddressParser{WordDecoder: options.WordDecoder},
+		
+		decodeQuotedNames: options.DecodeQuotedNames,
 	}
 }
 
@@ -608,6 +618,9 @@ func (hp *headerParser) parseAddress(s string) (ma *mail.Address) {
 
 	if strings.Trim(s, " \n") != "" {
 		ma, hp.err = hp.parser.address.Parse(s)
+		if hp.parser.decodeQuotedNames {
+			hp.decodeAddressName(ma)
+		}
 
 		return ma
 	}
@@ -622,10 +635,34 @@ func (hp *headerParser) parseAddressList(s string) (ma []*mail.Address) {
 
 	if strings.Trim(s, " \n") != "" {
 		ma, hp.err = hp.parser.address.ParseList(s)
+		if hp.parser.decodeQuotedNames {
+			hp.decodeAddressNames(ma)
+		}
 		return
 	}
 
 	return
+}
+
+func (hp *headerParser) decodeAddressName(addr *mail.Address) {
+	if addr == nil || hp.err != nil {
+		return
+	}
+	newName, decodeErr := hp.parser.word.Decode(addr.Name)
+	if decodeErr == nil {
+		addr.Name = newName
+	} else if !strings.Contains(decodeErr.Error(), "mime: invalid RFC 2047 encoded-word") { // !errors.Is(decodeErr, mime.errInvalidWord) {
+		hp.err = decodeErr
+	}
+}
+
+func (hp *headerParser) decodeAddressNames(list []*mail.Address) {
+	if hp.err != nil {
+		return
+	}
+	for _, addr := range list {
+		hp.decodeAddressName(addr)
+	}
 }
 
 func (hp *headerParser) parseAddressValues(s []string) (ma []*mail.Address) {

@@ -15,6 +15,9 @@ import (
 
 func TestParseEmail(t *testing.T) {
 	var testData = map[int]struct {
+		// Parser options
+		decodeQuotedNames bool
+
 		mailData string
 
 		contentType     string
@@ -514,6 +517,40 @@ So, "Hello".
 			textBody: `This is a message just to say hello.
 So, "Hello".`,
 		},
+		17: {
+			decodeQuotedNames: true, // decode the quoted encoded name.
+			mailData: `From: "=?UTF-8?q?John_D=C3=B3e?=" <jdoe@machine.example>
+Sender: Michael Jones <mjones@machine.example>
+To: Mary Smith <mary@example.net>
+Subject: Saying Hello
+Date: 22 Nov 1997 09:55:06 -0600
+Message-ID: <1234@local.machine.example>
+
+This is a message just to say hello.
+So, "Hello".
+`,
+			subject: "Saying Hello",
+			from: []mail.Address{
+				{
+					Name:    "John Dóe",
+					Address: "jdoe@machine.example",
+				},
+			},
+			to: []mail.Address{
+				{
+					Name:    "Mary Smith",
+					Address: "mary@example.net",
+				},
+			},
+			sender: mail.Address{
+				Name:    "Michael Jones",
+				Address: "mjones@machine.example",
+			},
+			messageID: "1234@local.machine.example",
+			date:      parseDate("Fri, 22 Nov 1997 09:55:06 -0600"),
+			textBody: `This is a message just to say hello.
+So, "Hello".`,
+		},
 	}
 
 	for index, td := range testData {
@@ -521,6 +558,7 @@ So, "Hello".`,
 			WordDecoder: &mime.WordDecoder{
 				CharsetReader: getCharsetReader,
 			},
+			DecodeQuotedNames: td.decodeQuotedNames,
 		})
 		e, err := parser.Parse(strings.NewReader(td.mailData))
 		if err != nil {
