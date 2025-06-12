@@ -4,10 +4,13 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/mail"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/text/encoding/ianaindex"
 )
 
 func TestParseEmail(t *testing.T) {
@@ -354,10 +357,10 @@ So, "Hello".`,
 		12: {
 			contentType: "multipart/mixed; boundary=f403045f1dcc043a44054c8e6bbf",
 			mailData:    attachment7bit,
-			subject:     "Peter Foobar",
+			subject:     "正體字; 正体字 Föobar Pêter Fóobar",
 			from: []mail.Address{
 				{
-					Name:    "Peter Foobar",
+					Name:    "Pêter Fóobar",
 					Address: "peter.foobar@gmail.com",
 				},
 			},
@@ -502,7 +505,12 @@ So, "Hello".`,
 	}
 
 	for index, td := range testData {
-		e, err := Parse(strings.NewReader(td.mailData))
+		parser := NewParser(&NewParserOptions{
+			WordDecoder: &mime.WordDecoder{
+				CharsetReader: getCharsetReader,
+			},
+		})
+		e, err := parser.Parse(strings.NewReader(td.mailData))
 		if err != nil {
 			t.Error(err)
 		}
@@ -688,6 +696,14 @@ func parseDate(in string) time.Time {
 	}
 
 	return out
+}
+
+func getCharsetReader(charset string, input io.Reader) (io.Reader, error) {
+	enc, err := ianaindex.MIME.Encoding(charset)
+	if err != nil {
+		return nil, err
+	}
+	return enc.NewDecoder().Reader(input), nil
 }
 
 type attachmentData struct {
@@ -1008,10 +1024,10 @@ Content-Type: text/html; charset="UTF-8"
 
 --000000000000ab2e2205a26de587--
 `
-var attachment7bit = `From: =?UTF-8?Q?Peter_Foobar?= <peter.foobar@gmail.com>
+var attachment7bit = `From: =?windows-1254?q?P=EAter?= =?windows-1258?q?_F=F3obar?= <peter.foobar@gmail.com>
 Date: Tue, 2 Apr 2019 11:12:26 +0000
 Message-ID: <CACtgX4kNXE7T5XKSKeH_zEcfUUmf2vXVASxYjaaK9cCn-3zb_g@mail.gmail.com>
-Subject: =?UTF-8?Q?Peter_Foobar?=
+Subject: =?big5?b?pb/F6aZyOyClv8pepnI=?= =?windows-1252?b?IEb2b2Jhcg==?= =?windows-1254?q?_P=EAter?= =?windows-1258?q?_F=F3obar?=
 To: dusan@kasan.sk
 Content-Type: multipart/mixed; boundary=f403045f1dcc043a44054c8e6bbf
 
