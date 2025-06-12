@@ -151,6 +151,7 @@ func (parser mailParser) createEmailFromHeader(header mail.Header) (email Email,
 	email.To = hp.parseAddressList(header.Get("To"))
 	email.Cc = hp.parseAddressList(header.Get("Cc"))
 	email.Bcc = hp.parseAddressList(header.Get("Bcc"))
+	email.DeliveredTo = hp.parseAddressValues(header["Delivered-To"])
 	email.Date = hp.parseTime(header.Get("Date"))
 	email.ResentFrom = hp.parseAddressList(header.Get("Resent-From"))
 	email.ResentSender = hp.parseAddress(header.Get("Resent-Sender"))
@@ -627,6 +628,19 @@ func (hp *headerParser) parseAddressList(s string) (ma []*mail.Address) {
 	return
 }
 
+func (hp *headerParser) parseAddressValues(s []string) (ma []*mail.Address) {
+	for _, s := range s {
+		var result *mail.Address
+		result = hp.parseAddress(s)
+		if hp.err != nil {
+			return
+		}
+		ma = append(ma, result)
+	}
+
+	return
+}
+
 func (hp *headerParser) parseTime(s string) (t time.Time) {
 	if hp.err != nil || s == "" {
 		return
@@ -700,17 +714,18 @@ type EmbeddedFile struct {
 type Email struct {
 	Header mail.Header
 
-	Subject    string
-	Sender     *mail.Address
-	From       []*mail.Address
-	ReplyTo    []*mail.Address
-	To         []*mail.Address
-	Cc         []*mail.Address
-	Bcc        []*mail.Address
-	Date       time.Time
-	MessageID  string
-	InReplyTo  []string
-	References []string
+	Subject     string
+	Sender      *mail.Address
+	From        []*mail.Address
+	ReplyTo     []*mail.Address
+	To          []*mail.Address
+	Cc          []*mail.Address
+	Bcc         []*mail.Address
+	DeliveredTo []*mail.Address
+	Date        time.Time
+	MessageID   string
+	InReplyTo   []string
+	References  []string
 
 	ResentFrom      []*mail.Address
 	ResentSender    *mail.Address

@@ -27,6 +27,7 @@ func TestParseEmail(t *testing.T) {
 		replyTo         []mail.Address
 		cc              []mail.Address
 		bcc             []mail.Address
+		deliveredTo     []mail.Address
 		messageID       string
 		resentDate      time.Time
 		resentFrom      []mail.Address
@@ -201,6 +202,17 @@ So, "Hello".`,
 				{
 					Name:    "",
 					Address: "dusan@kasan.sk",
+				},
+			},
+			deliveredTo: []mail.Address{
+				{
+					Address: "dusan@kasan.sk",
+				},
+				{
+					Address: "not-dusan@kasan.sk",
+				},
+				{
+					Address: "also-not-dusan@kasan.sk",
 				},
 			},
 			messageID: "CACtgX4kNXE7T5XKSKeH_zEcfUUmf2vXVASxYjaaK9cCn-3zb_g@mail.gmail.com",
@@ -480,7 +492,7 @@ Message-ID: <1234@local.machine.example>
 This is a message just to say hello.
 So, "Hello".
 `,
-			subject:  "Saying Hello",
+			subject: "Saying Hello",
 			from: []mail.Address{
 				{
 					Name:    "John Doe",
@@ -566,6 +578,11 @@ So, "Hello".`,
 		d = dereferenceAddressList(e.Bcc)
 		if !assertAddressListEq(td.bcc, d) {
 			t.Errorf("[Test Case %v] Wrong bcc. Expected: %s, Got: %s", index, td.bcc, d)
+		}
+
+		d = dereferenceAddressList(e.DeliveredTo)
+		if !assertAddressListEq(td.deliveredTo, d) {
+			t.Errorf("[Test Case %v] Wrong deliveredTo. Expected: %s, Got: %s", index, td.deliveredTo, d)
 		}
 
 		if td.resentMessageID != e.ResentMessageID {
@@ -778,7 +795,10 @@ func dereferenceAddressList(al []*mail.Address) (result []mail.Address) {
 	return
 }
 
-var data1 = `From: =?UTF-8?Q?Peter_Pahol=C3=ADk?= <peter.paholik@gmail.com>
+var data1 = `Delivered-To: dusan@kasan.sk
+Delivered-To: not-dusan@kasan.sk
+Delivered-To: also-not-dusan@kasan.sk
+From: =?UTF-8?Q?Peter_Pahol=C3=ADk?= <peter.paholik@gmail.com>
 Date: Fri, 7 Apr 2017 09:17:26 +0200
 Message-ID: <CACtgX4kNXE7T5XKSKeH_zEcfUUmf2vXVASxYjaaK9cCn-3zb_g@mail.gmail.com>
 Subject: =?UTF-8?Q?Peter_Pahol=C3=ADk?=
