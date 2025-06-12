@@ -3,7 +3,7 @@ package parsemail
 import (
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/mail"
 	"strings"
 	"testing"
@@ -512,7 +512,7 @@ So, "Hello".`,
 		}
 
 		if td.content != "" {
-			b, err := ioutil.ReadAll(e.Content)
+			b, err := io.ReadAll(e.Content)
 			if err != nil {
 				t.Error(err)
 			} else if td.content != string(b) {
@@ -626,7 +626,7 @@ So, "Hello".`,
 				found := false
 
 				for i, ra := range attachs {
-					b, err := ioutil.ReadAll(ra.Data)
+					b, err := io.ReadAll(ra.Data)
 					if err != nil {
 						t.Error(err)
 					}
@@ -656,7 +656,7 @@ So, "Hello".`,
 				found := false
 
 				for i, ra := range embeds {
-					b, err := ioutil.ReadAll(ra.Data)
+					b, err := io.ReadAll(ra.Data)
 					if err != nil {
 						t.Error(err)
 					}
