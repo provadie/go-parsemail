@@ -519,13 +519,24 @@ func decodeContent(content io.Reader, encoding string) (io.Reader, error) {
 		}
 		return out, nil
 	case "base64":
-		decoded := base64.NewDecoder(base64.StdEncoding, content)
-		b, err := ioutil.ReadAll(decoded)
+		b, err := ioutil.ReadAll(content)
+		if err != nil {
+			return nil, err
+		}
+		// Strip padding and any embedded whitespace before decoding.
+		b = bytes.Map(func(r rune) rune {
+			switch r {
+			case '=', ' ', '\t', '\r', '\n':
+				return -1
+			}
+			return r
+		}, b)
+		decoded, err := base64.RawStdEncoding.DecodeString(string(b))
 		if err != nil {
 			return nil, err
 		}
 
-		return bytes.NewReader(b), nil
+		return bytes.NewReader(decoded), nil
 	case "7bit", "8bit", "":
 		dd, err := ioutil.ReadAll(content)
 		if err != nil {

@@ -1,17 +1,24 @@
 package parsemail
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"mime"
 	"net/mail"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/text/encoding/ianaindex"
 )
 
 func TestParseEmail(t *testing.T) {
 	var testData = map[int]struct {
+		// Parser options
+		decodeQuotedNames bool
+
 		mailData string
 
 		contentType     string
@@ -24,6 +31,7 @@ func TestParseEmail(t *testing.T) {
 		replyTo         []mail.Address
 		cc              []mail.Address
 		bcc             []mail.Address
+		deliveredTo     []mail.Address
 		messageID       string
 		resentDate      time.Time
 		resentFrom      []mail.Address
@@ -200,6 +208,17 @@ So, "Hello".`,
 					Address: "dusan@kasan.sk",
 				},
 			},
+			deliveredTo: []mail.Address{
+				{
+					Address: "dusan@kasan.sk",
+				},
+				{
+					Address: "not-dusan@kasan.sk",
+				},
+				{
+					Address: "also-not-dusan@kasan.sk",
+				},
+			},
 			messageID: "CACtgX4kNXE7T5XKSKeH_zEcfUUmf2vXVASxYjaaK9cCn-3zb_g@mail.gmail.com",
 			date:      parseDate("Fri, 07 Apr 2017 09:17:26 +0200"),
 			htmlBody:  "<div dir=\"ltr\"><br></div>",
@@ -354,10 +373,10 @@ So, "Hello".`,
 		12: {
 			contentType: "multipart/mixed; boundary=f403045f1dcc043a44054c8e6bbf",
 			mailData:    attachment7bit,
-			subject:     "Peter Foobar",
+			subject:     "正體字; 正体字 Föobar Pêter Fóobar",
 			from: []mail.Address{
 				{
-					Name:    "Peter Foobar",
+					Name:    "Pêter Fóobar",
 					Address: "peter.foobar@gmail.com",
 				},
 			},
@@ -466,10 +485,83 @@ So, "Hello".`,
 				},
 			},
 		},
+		16: {
+			mailData: `From: John Doe <jdoe@machine.example>
+Sender: Michael Jones <mjones@machine.example>
+To: Mary Smith <mary@example.net>
+Subject: Saying Hello
+Date: 22 Nov 1997 09:55:06 -0600
+Message-ID: <1234@local.machine.example>
+
+This is a message just to say hello.
+So, "Hello".
+`,
+			subject: "Saying Hello",
+			from: []mail.Address{
+				{
+					Name:    "John Doe",
+					Address: "jdoe@machine.example",
+				},
+			},
+			to: []mail.Address{
+				{
+					Name:    "Mary Smith",
+					Address: "mary@example.net",
+				},
+			},
+			sender: mail.Address{
+				Name:    "Michael Jones",
+				Address: "mjones@machine.example",
+			},
+			messageID: "1234@local.machine.example",
+			date:      parseDate("Fri, 22 Nov 1997 09:55:06 -0600"),
+			textBody: `This is a message just to say hello.
+So, "Hello".`,
+		},
+		17: {
+			decodeQuotedNames: true, // decode the quoted encoded name.
+			mailData: `From: "=?UTF-8?q?John_D=C3=B3e?=" <jdoe@machine.example>
+Sender: Michael Jones <mjones@machine.example>
+To: Mary Smith <mary@example.net>
+Subject: Saying Hello
+Date: 22 Nov 1997 09:55:06 -0600
+Message-ID: <1234@local.machine.example>
+
+This is a message just to say hello.
+So, "Hello".
+`,
+			subject: "Saying Hello",
+			from: []mail.Address{
+				{
+					Name:    "John Dóe",
+					Address: "jdoe@machine.example",
+				},
+			},
+			to: []mail.Address{
+				{
+					Name:    "Mary Smith",
+					Address: "mary@example.net",
+				},
+			},
+			sender: mail.Address{
+				Name:    "Michael Jones",
+				Address: "mjones@machine.example",
+			},
+			messageID: "1234@local.machine.example",
+			date:      parseDate("Fri, 22 Nov 1997 09:55:06 -0600"),
+			textBody: `This is a message just to say hello.
+So, "Hello".`,
+		},
 	}
 
 	for index, td := range testData {
-		e, err := Parse(strings.NewReader(td.mailData))
+		parser := NewParser(&NewParserOptions{
+			WordDecoder: &mime.WordDecoder{
+				CharsetReader: getCharsetReader,
+			},
+			DecodeQuotedNames: td.decodeQuotedNames,
+		})
+		e, err := parser.Parse(strings.NewReader(td.mailData))
 		if err != nil {
 			t.Error(err)
 		}
@@ -479,7 +571,7 @@ So, "Hello".`,
 		}
 
 		if td.content != "" {
-			b, err := ioutil.ReadAll(e.Content)
+			b, err := io.ReadAll(e.Content)
 			if err != nil {
 				t.Error(err)
 			} else if td.content != string(b) {
@@ -525,6 +617,11 @@ So, "Hello".`,
 		d = dereferenceAddressList(e.Bcc)
 		if !assertAddressListEq(td.bcc, d) {
 			t.Errorf("[Test Case %v] Wrong bcc. Expected: %s, Got: %s", index, td.bcc, d)
+		}
+
+		d = dereferenceAddressList(e.DeliveredTo)
+		if !assertAddressListEq(td.deliveredTo, d) {
+			t.Errorf("[Test Case %v] Wrong deliveredTo. Expected: %s, Got: %s", index, td.deliveredTo, d)
 		}
 
 		if td.resentMessageID != e.ResentMessageID {
@@ -593,7 +690,7 @@ So, "Hello".`,
 				found := false
 
 				for i, ra := range attachs {
-					b, err := ioutil.ReadAll(ra.Data)
+					b, err := io.ReadAll(ra.Data)
 					if err != nil {
 						t.Error(err)
 					}
@@ -623,7 +720,7 @@ So, "Hello".`,
 				found := false
 
 				for i, ra := range embeds {
-					b, err := ioutil.ReadAll(ra.Data)
+					b, err := io.ReadAll(ra.Data)
 					if err != nil {
 						t.Error(err)
 					}
@@ -655,6 +752,14 @@ func parseDate(in string) time.Time {
 	}
 
 	return out
+}
+
+func getCharsetReader(charset string, input io.Reader) (io.Reader, error) {
+	enc, err := ianaindex.MIME.Encoding(charset)
+	if err != nil {
+		return nil, err
+	}
+	return enc.NewDecoder().Reader(input), nil
 }
 
 type attachmentData struct {
@@ -729,7 +834,10 @@ func dereferenceAddressList(al []*mail.Address) (result []mail.Address) {
 	return
 }
 
-var data1 = `From: =?UTF-8?Q?Peter_Pahol=C3=ADk?= <peter.paholik@gmail.com>
+var data1 = `Delivered-To: dusan@kasan.sk
+Delivered-To: not-dusan@kasan.sk
+Delivered-To: also-not-dusan@kasan.sk
+From: =?UTF-8?Q?Peter_Pahol=C3=ADk?= <peter.paholik@gmail.com>
 Date: Fri, 7 Apr 2017 09:17:26 +0200
 Message-ID: <CACtgX4kNXE7T5XKSKeH_zEcfUUmf2vXVASxYjaaK9cCn-3zb_g@mail.gmail.com>
 Subject: =?UTF-8?Q?Peter_Pahol=C3=ADk?=
@@ -975,10 +1083,10 @@ Content-Type: text/html; charset="UTF-8"
 
 --000000000000ab2e2205a26de587--
 `
-var attachment7bit = `From: =?UTF-8?Q?Peter_Foobar?= <peter.foobar@gmail.com>
+var attachment7bit = `From: =?windows-1254?q?P=EAter?= =?windows-1258?q?_F=F3obar?= <peter.foobar@gmail.com>
 Date: Tue, 2 Apr 2019 11:12:26 +0000
 Message-ID: <CACtgX4kNXE7T5XKSKeH_zEcfUUmf2vXVASxYjaaK9cCn-3zb_g@mail.gmail.com>
-Subject: =?UTF-8?Q?Peter_Foobar?=
+Subject: =?big5?b?pb/F6aZyOyClv8pepnI=?= =?windows-1252?b?IEb2b2Jhcg==?= =?windows-1254?q?_P=EAter?= =?windows-1258?q?_F=F3obar?=
 To: dusan@kasan.sk
 Content-Type: multipart/mixed; boundary=f403045f1dcc043a44054c8e6bbf
 
@@ -1083,3 +1191,37 @@ PGRpdiBkaXI9Imx0ciI+PGRpdj5UaGlzIGlzIGEgcmVjZWlwdC48L2Rpdj48ZGl2Pjxicj48L2Rp
 dj48ZGl2Pjxicj48YnI+PC9kaXY+PC9kaXY+
 ------=_Part_746216_364383494.1698130589208--
 `
+
+// TestDecodeContentBase64Padding verifies decodeContent handles base64 payloads
+// with missing padding ("=") and embedded whitespace, as produced by some mail
+// clients. Regression test for PROV-8933.
+func TestDecodeContentBase64Padding(t *testing.T) {
+	want := []byte("Hello World")
+
+	cases := map[string]struct {
+		input    string
+		encoding string
+	}{
+		"padded":             {"SGVsbG8gV29ybGQ=", "base64"},
+		"unpadded":           {"SGVsbG8gV29ybGQ", "base64"},
+		"padded_with_crlf":   {"SGVsbG8g\r\nV29ybGQ=", "base64"},
+		"unpadded_with_crlf": {"SGVsbG8g\r\nV29ybGQ", "base64"},
+		"padded_with_spaces": {"SGVsbG8g V29ybGQ=", "base64"},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r, err := decodeContent(strings.NewReader(tc.input), tc.encoding)
+			if err != nil {
+				t.Fatalf("decodeContent returned error: %v", err)
+			}
+			got, err := io.ReadAll(r)
+			if err != nil {
+				t.Fatalf("ReadAll returned error: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("decoded output = %q, want %q", got, want)
+			}
+		})
+	}
+}
