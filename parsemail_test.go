@@ -1,6 +1,7 @@
 package parsemail
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -1190,3 +1191,37 @@ PGRpdiBkaXI9Imx0ciI+PGRpdj5UaGlzIGlzIGEgcmVjZWlwdC48L2Rpdj48ZGl2Pjxicj48L2Rp
 dj48ZGl2Pjxicj48YnI+PC9kaXY+PC9kaXY+
 ------=_Part_746216_364383494.1698130589208--
 `
+
+// TestDecodeContentBase64Padding verifies decodeContent handles base64 payloads
+// with missing padding ("=") and embedded whitespace, as produced by some mail
+// clients. Regression test for PROV-8933.
+func TestDecodeContentBase64Padding(t *testing.T) {
+	want := []byte("Hello World")
+
+	cases := map[string]struct {
+		input    string
+		encoding string
+	}{
+		"padded":             {"SGVsbG8gV29ybGQ=", "base64"},
+		"unpadded":           {"SGVsbG8gV29ybGQ", "base64"},
+		"padded_with_crlf":   {"SGVsbG8g\r\nV29ybGQ=", "base64"},
+		"unpadded_with_crlf": {"SGVsbG8g\r\nV29ybGQ", "base64"},
+		"padded_with_spaces": {"SGVsbG8g V29ybGQ=", "base64"},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r, err := decodeContent(strings.NewReader(tc.input), tc.encoding)
+			if err != nil {
+				t.Fatalf("decodeContent returned error: %v", err)
+			}
+			got, err := io.ReadAll(r)
+			if err != nil {
+				t.Fatalf("ReadAll returned error: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("decoded output = %q, want %q", got, want)
+			}
+		})
+	}
+}

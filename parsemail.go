@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
@@ -60,7 +61,7 @@ func NewParser(options *NewParserOptions) MailParser {
 	return mailParser{
 		word:    options.WordDecoder,
 		address: &mail.AddressParser{WordDecoder: options.WordDecoder},
-		
+
 		decodeQuotedNames: options.DecodeQuotedNames,
 	}
 }
@@ -577,13 +578,24 @@ func decodeContent(content io.Reader, encoding string) (io.Reader, error) {
 		}
 		return out, nil
 	case "base64":
-		decoded := base64.NewDecoder(base64.StdEncoding, content)
-		b, err := io.ReadAll(decoded)
+		b, err := ioutil.ReadAll(content)
+		if err != nil {
+			return nil, err
+		}
+		// Strip padding and any embedded whitespace before decoding.
+		b = bytes.Map(func(r rune) rune {
+			switch r {
+			case '=', ' ', '\t', '\r', '\n':
+				return -1
+			}
+			return r
+		}, b)
+		decoded, err := base64.RawStdEncoding.DecodeString(string(b))
 		if err != nil {
 			return nil, err
 		}
 
-		return bytes.NewReader(b), nil
+		return bytes.NewReader(decoded), nil
 	case "7bit", "8bit", "":
 		dd, err := io.ReadAll(content)
 		if err != nil {
@@ -689,14 +701,14 @@ func (hp *headerParser) parseTime(s string) (t time.Time) {
 		"Mon, 2 Jan 2006 15:04:05 -0700",
 		time.RFC1123Z + " (MST)",
 		"Mon, 2 Jan 2006 15:04:05 -0700 (MST)",
-		time.RFC1123Z + " (GMT-07:00)", // include additional tz
+		time.RFC1123Z + " (GMT-07:00)",               // include additional tz
 		"Mon, 2 Jan 2006 15:04:05 -0700 (GMT-07:00)", // include additional tz
-		time.RFC1123[5:], // omit dow
-		time.RFC1123Z[5:], // omit dow
+		time.RFC1123[5:],                             // omit dow
+		time.RFC1123Z[5:],                            // omit dow
 		"2 Jan 2006 15:04:05 -0700",
 		time.RFC1123Z[5:] + " (MST)", // omit dow
 		"2 Jan 2006 15:04:05 -0700 (MST)",
-		time.RFC1123Z[5:] + " (GMT-07:00)", // include additional tz and omit dow
+		time.RFC1123Z[5:] + " (GMT-07:00)",      // include additional tz and omit dow
 		"2 Jan 2006 15:04:05 -0700 (GMT-07:00)", // include additional tz
 	}
 
