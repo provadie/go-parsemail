@@ -26,37 +26,87 @@ const contentTypeTextExtension = "text/x-"
 const contentTypeApplicationOctetStream = "application/octet-stream"
 const maxDepthOfMultipartMixed = 3
 
+type MailParser interface {
+	Parse(r io.Reader) (email Email, err error)
+}
+
+type mailParser struct {
+	word    *mime.WordDecoder
+	address *mail.AddressParser
+
+	decodeQuotedNames bool
+}
+
+// NewParserOptions specifies options for creating a new mail parser instance.
+type NewParserOptions struct {
+	// WordDecoder is used to decode RFC 2047 encoded-words in headers.
+	// If nil, a default mime.WordDecoder will be used. Can be used to decode other character sets.
+	WordDecoder *mime.WordDecoder
+
+	// DecodeQuotedNames indicates whether to decode faulty formatted encoded names in email addresses.
+	// Sometimes the display names in email addresses are not properly formatted, and this option
+	// allows the parser to attempt to decode them. Defaults to false.
+	// If set to true, it will try to decode names like `"=?UTF-8?Q?Peter_Pahol=C3=ADk?=" <peter.paholik@gmail.com>`.
+	DecodeQuotedNames bool
+}
+
+// NewParser constructs a new mail parser instance with the provided options.
+func NewParser(options *NewParserOptions) MailParser {
+	if options == nil {
+		options = &NewParserOptions{}
+	}
+	if options.WordDecoder == nil {
+		options.WordDecoder = &mime.WordDecoder{}
+	}
+	return mailParser{
+		word:    options.WordDecoder,
+		address: &mail.AddressParser{WordDecoder: options.WordDecoder},
+
+		decodeQuotedNames: options.DecodeQuotedNames,
+	}
+}
+
 // Parse an email message read from io.Reader into parsemail.Email struct
 func Parse(r io.Reader) (email Email, err error) {
+	parser := NewParser(nil)
+	return parser.Parse(r)
+}
+
+// Parse an email message read from io.Reader into parsemail.Email struct
+func (parser mailParser) Parse(r io.Reader) (email Email, err error) {
 	msg, err := mail.ReadMessage(r)
 	if err != nil {
 		return
 	}
 
-	email, err = createEmailFromHeader(msg.Header)
+	email, err = parser.createEmailFromHeader(msg.Header)
 	if err != nil {
 		return
 	}
 
 	email.ContentType = msg.Header.Get("Content-Type")
-	contentType, params, err := parseContentType(email.ContentType)
+	contentType, params, err := parser.parseContentType(email.ContentType)
 	if err != nil {
 		return
 	}
 
 	switch contentType {
 	case contentTypeMultipartSigned:
-		email.TextBody, email.HTMLBody, email.Attachments, email.EmbeddedFiles, email.TextBodies, email.HTMLBodies, err = parseMultipartMixed(msg.Body, params["boundary"], 1)
+		email.TextBody, email.HTMLBody, email.Attachments, email.EmbeddedFiles, email.TextBodies, email.HTMLBodies, err = parser.parseMultipartMixed(msg.Body, params["boundary"], 1)
 	case contentTypeMultipartMixed:
-		email.TextBody, email.HTMLBody, email.Attachments, email.EmbeddedFiles, email.TextBodies, email.HTMLBodies, err = parseMultipartMixed(msg.Body, params["boundary"], 1)
+		email.TextBody, email.HTMLBody, email.Attachments, email.EmbeddedFiles, email.TextBodies, email.HTMLBodies, err = parser.parseMultipartMixed(msg.Body, params["boundary"], 1)
 	case contentTypeMultipartAlternative:
-		email.TextBody, email.HTMLBody, email.Attachments, email.EmbeddedFiles, email.TextBodies, email.HTMLBodies, err = parseMultipartAlternative(msg.Body, params["boundary"])
+		email.TextBody, email.HTMLBody, email.Attachments, email.EmbeddedFiles, email.TextBodies, email.HTMLBodies, err = parser.parseMultipartAlternative(msg.Body, params["boundary"])
 	case contentTypeMultipartRelated:
-		email.TextBody, email.HTMLBody, email.Attachments, email.EmbeddedFiles, email.TextBodies, email.HTMLBodies, err = parseMultipartRelated(msg.Body, params["boundary"])
+		email.TextBody, email.HTMLBody, email.Attachments, email.EmbeddedFiles, email.TextBodies, email.HTMLBodies, err = parser.parseMultipartRelated(msg.Body, params["boundary"])
 	case contentTypeTextPlain:
 		buf := new(bytes.Buffer)
 		tee := io.TeeReader(msg.Body, buf)
-		message, _ := ioutil.ReadAll(tee)
+		var message []byte
+		message, err = io.ReadAll(tee)
+		if err != nil {
+			return
+		}
 		email.TextBody = strings.TrimSuffix(string(message[:]), "\n")
 		var data io.Reader
 		data, err = decodeContent(buf, email.Header.Get("Content-Transfer-Encoding"))
@@ -75,7 +125,11 @@ func Parse(r io.Reader) (email Email, err error) {
 	case contentTypeTextHtml:
 		buf := new(bytes.Buffer)
 		tee := io.TeeReader(msg.Body, buf)
-		message, _ := ioutil.ReadAll(tee)
+		var message []byte
+		message, err = io.ReadAll(tee)
+		if err != nil {
+			return
+		}
 		email.HTMLBody = strings.TrimSuffix(string(message[:]), "\n")
 		var data io.Reader
 		data, err = decodeContent(buf, email.Header.Get("Content-Transfer-Encoding"))
@@ -98,16 +152,17 @@ func Parse(r io.Reader) (email Email, err error) {
 	return
 }
 
-func createEmailFromHeader(header mail.Header) (email Email, err error) {
-	hp := headerParser{header: &header}
+func (parser mailParser) createEmailFromHeader(header mail.Header) (email Email, err error) {
+	hp := headerParser{header: &header, parser: parser}
 
-	email.Subject = decodeMimeSentence(header.Get("Subject"))
+	email.Subject = hp.parseHeader(header.Get("Subject"))
 	email.From = hp.parseAddressList(header.Get("From"))
 	email.Sender = hp.parseAddress(header.Get("Sender"))
 	email.ReplyTo = hp.parseAddressList(header.Get("Reply-To"))
 	email.To = hp.parseAddressList(header.Get("To"))
 	email.Cc = hp.parseAddressList(header.Get("Cc"))
 	email.Bcc = hp.parseAddressList(header.Get("Bcc"))
+	email.DeliveredTo = hp.parseAddressValues(header["Delivered-To"])
 	email.Date = hp.parseTime(header.Get("Date"))
 	email.ResentFrom = hp.parseAddressList(header.Get("Resent-From"))
 	email.ResentSender = hp.parseAddress(header.Get("Resent-Sender"))
@@ -127,7 +182,7 @@ func createEmailFromHeader(header mail.Header) (email Email, err error) {
 
 	//decode whole header for easier access to extra fields
 	//todo: should we decode? aren't only standard fields mime encoded?
-	email.Header, err = decodeHeaderMime(header)
+	email.Header, err = parser.decodeHeaderMime(header)
 	if err != nil {
 		return
 	}
@@ -135,7 +190,7 @@ func createEmailFromHeader(header mail.Header) (email Email, err error) {
 	return
 }
 
-func parseContentType(contentTypeHeader string) (contentType string, params map[string]string, err error) {
+func (parser mailParser) parseContentType(contentTypeHeader string) (contentType string, params map[string]string, err error) {
 	if contentTypeHeader == "" {
 		contentType = contentTypeTextPlain
 		return
@@ -144,7 +199,7 @@ func parseContentType(contentTypeHeader string) (contentType string, params map[
 	return mime.ParseMediaType(contentTypeHeader)
 }
 
-func parseMultipartRelated(msg io.Reader, boundary string) (textBody, htmlBody string, attachments []Attachment, embeddedFiles []EmbeddedFile, textBodies []*TextBody, htmlBodies []*HTMLBody, err error) {
+func (parser mailParser) parseMultipartRelated(msg io.Reader, boundary string) (textBody, htmlBody string, attachments []Attachment, embeddedFiles []EmbeddedFile, textBodies []*TextBody, htmlBodies []*HTMLBody, err error) {
 	pmr := multipart.NewReader(msg, boundary)
 	for {
 		part, err := NextPart(pmr)
@@ -162,7 +217,7 @@ func parseMultipartRelated(msg io.Reader, boundary string) (textBody, htmlBody s
 
 		switch contentType {
 		case contentTypeTextPlain:
-			ppContent, err := ioutil.ReadAll(part.tee)
+			ppContent, err := io.ReadAll(part.tee)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -175,7 +230,7 @@ func parseMultipartRelated(msg io.Reader, boundary string) (textBody, htmlBody s
 				Body: *b,
 			})
 		case contentTypeTextHtml:
-			ppContent, err := ioutil.ReadAll(part.tee)
+			ppContent, err := io.ReadAll(part.tee)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -189,13 +244,13 @@ func parseMultipartRelated(msg io.Reader, boundary string) (textBody, htmlBody s
 				Body: *b,
 			})
 		case contentTypeTextCalendar:
-			ef, err := decodeEmbeddedFile(part)
+			ef, err := parser.decodeEmbeddedFile(part)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
 			embeddedFiles = append(embeddedFiles, ef)
 		case contentTypeMultipartAlternative:
-			tb, hb, af, ef, tbs, hbs, err := parseMultipartAlternative(part, params["boundary"])
+			tb, hb, af, ef, tbs, hbs, err := parser.parseMultipartAlternative(part, params["boundary"])
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -207,7 +262,7 @@ func parseMultipartRelated(msg io.Reader, boundary string) (textBody, htmlBody s
 			htmlBodies = append(htmlBodies, hbs...)
 		default:
 			if isEmbeddedFile(part) {
-				ef, err := decodeEmbeddedFile(part)
+				ef, err := parser.decodeEmbeddedFile(part)
 				if err != nil {
 					return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 				}
@@ -222,7 +277,7 @@ func parseMultipartRelated(msg io.Reader, boundary string) (textBody, htmlBody s
 	return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 }
 
-func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBody string, attachments []Attachment, embeddedFiles []EmbeddedFile, textBodies []*TextBody, htmlBodies []*HTMLBody, err error) {
+func (parser mailParser) parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBody string, attachments []Attachment, embeddedFiles []EmbeddedFile, textBodies []*TextBody, htmlBodies []*HTMLBody, err error) {
 	pmr := multipart.NewReader(msg, boundary)
 	for {
 		part, err := NextPart(pmr)
@@ -240,7 +295,7 @@ func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBo
 
 		switch contentType {
 		case contentTypeTextPlain:
-			ppContent, err := ioutil.ReadAll(part.tee)
+			ppContent, err := io.ReadAll(part.tee)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -253,7 +308,7 @@ func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBo
 				Body: *b,
 			})
 		case contentTypeTextHtml:
-			ppContent, err := ioutil.ReadAll(part.tee)
+			ppContent, err := io.ReadAll(part.tee)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -266,13 +321,13 @@ func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBo
 				Body: *b,
 			})
 		case contentTypeTextCalendar:
-			ef, err := decodeEmbeddedFile(part)
+			ef, err := parser.decodeEmbeddedFile(part)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
 			embeddedFiles = append(embeddedFiles, ef)
 		case contentTypeMultipartRelated:
-			tb, hb, af, ef, tbs, hbs, err := parseMultipartRelated(part, params["boundary"])
+			tb, hb, af, ef, tbs, hbs, err := parser.parseMultipartRelated(part, params["boundary"])
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -283,7 +338,7 @@ func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBo
 			textBodies = append(textBodies, tbs...)
 			htmlBodies = append(htmlBodies, hbs...)
 		case contentTypeMultipartMixed:
-			tb, hb, at, ef, tbs, hbs, err := parseMultipartMixed(part, params["boundary"], 1)
+			tb, hb, at, ef, tbs, hbs, err := parser.parseMultipartMixed(part, params["boundary"], 1)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -298,7 +353,7 @@ func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBo
 				continue
 			}
 			if isEmbeddedFile(part) {
-				ef, err := decodeEmbeddedFile(part)
+				ef, err := parser.decodeEmbeddedFile(part)
 				if err != nil {
 					return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 				}
@@ -313,7 +368,7 @@ func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBo
 	return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 }
 
-func parseMultipartMixed(msg io.Reader, boundary string, depth int) (textBody, htmlBody string, attachments []Attachment, embeddedFiles []EmbeddedFile, textBodies []*TextBody, htmlBodies []*HTMLBody, err error) {
+func (parser mailParser) parseMultipartMixed(msg io.Reader, boundary string, depth int) (textBody, htmlBody string, attachments []Attachment, embeddedFiles []EmbeddedFile, textBodies []*TextBody, htmlBodies []*HTMLBody, err error) {
 	if depth > maxDepthOfMultipartMixed {
 		return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, fmt.Errorf("nested multiple/mixed above max depth")
 	}
@@ -326,7 +381,7 @@ func parseMultipartMixed(msg io.Reader, boundary string, depth int) (textBody, h
 			return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 		}
 		if isAttachment(part) {
-			at, err := decodeAttachment(part)
+			at, err := parser.decodeAttachment(part)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -338,7 +393,7 @@ func parseMultipartMixed(msg io.Reader, boundary string, depth int) (textBody, h
 			return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 		}
 		if contentType == contentTypeMultipartAlternative {
-			tb, hb, ats, efs, tbs, hbs, err := parseMultipartAlternative(part, params["boundary"])
+			tb, hb, ats, efs, tbs, hbs, err := parser.parseMultipartAlternative(part, params["boundary"])
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -349,7 +404,7 @@ func parseMultipartMixed(msg io.Reader, boundary string, depth int) (textBody, h
 			textBodies = append(textBodies, tbs...)
 			htmlBodies = append(htmlBodies, hbs...)
 		} else if contentType == contentTypeMultipartRelated {
-			tb, hb, ats, efs, tbs, hbs, err := parseMultipartRelated(part, params["boundary"])
+			tb, hb, ats, efs, tbs, hbs, err := parser.parseMultipartRelated(part, params["boundary"])
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -360,7 +415,7 @@ func parseMultipartMixed(msg io.Reader, boundary string, depth int) (textBody, h
 			textBodies = append(textBodies, tbs...)
 			htmlBodies = append(htmlBodies, hbs...)
 		} else if contentType == contentTypeMultipartMixed {
-			tb, hb, ats, efs, tbs, hbs, err := parseMultipartMixed(part, params["boundary"], depth+1)
+			tb, hb, ats, efs, tbs, hbs, err := parser.parseMultipartMixed(part, params["boundary"], depth+1)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -371,7 +426,7 @@ func parseMultipartMixed(msg io.Reader, boundary string, depth int) (textBody, h
 			textBodies = append(textBodies, tbs...)
 			htmlBodies = append(htmlBodies, hbs...)
 		} else if contentType == contentTypeTextPlain {
-			ppContent, err := ioutil.ReadAll(part.tee)
+			ppContent, err := io.ReadAll(part.tee)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -384,7 +439,7 @@ func parseMultipartMixed(msg io.Reader, boundary string, depth int) (textBody, h
 				Body: *b,
 			})
 		} else if contentType == contentTypeTextHtml {
-			ppContent, err := ioutil.ReadAll(part.tee)
+			ppContent, err := io.ReadAll(part.tee)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
@@ -397,19 +452,22 @@ func parseMultipartMixed(msg io.Reader, boundary string, depth int) (textBody, h
 				Body: *b,
 			})
 		} else if contentType == contentTypeTextCalendar {
-			ef, err := decodeEmbeddedFile(part)
+			ef, err := parser.decodeEmbeddedFile(part)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
 			embeddedFiles = append(embeddedFiles, ef)
 		} else if contentType == contentTypeApplicationOctetStream {
-			at, err := decodeAttachment(part)
+			at, err := parser.decodeAttachment(part)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 			}
 			if at.Filename == "" {
 				if name, ok := params["name"]; ok {
-					at.Filename = decodeMimeSentence(name)
+					at.Filename, err = parser.decodeMimeSentence(name)
+					if err != nil {
+						return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
+					}
 				}
 			}
 			attachments = append(attachments, at)
@@ -421,49 +479,41 @@ func parseMultipartMixed(msg io.Reader, boundary string, depth int) (textBody, h
 	return textBody, htmlBody, attachments, embeddedFiles, textBodies, htmlBodies, err
 }
 
-func decodeMimeSentence(s string) string {
-	result := []string{}
-	ss := strings.Split(s, " ")
-
-	for _, word := range ss {
-		dec := new(mime.WordDecoder)
-		w, err := dec.Decode(word)
-		if err != nil {
-			if len(result) == 0 {
-				w = word
-			} else {
-				w = " " + word
-			}
-		}
-
-		result = append(result, w)
-	}
-
-	return strings.Join(result, "")
+// decodeMimeSentence decodes all encoded-words of the given string.
+func (parser mailParser) decodeMimeSentence(s string) (string, error) {
+	return parser.word.DecodeHeader(s)
 }
 
-func decodeHeaderMime(header mail.Header) (mail.Header, error) {
-	parsedHeader := map[string][]string{}
+// decodeHeaderMime decodes all encoded-words values of the header map
+func (parser mailParser) decodeHeaderMime(header mail.Header) (mail.Header, error) {
+	parsedHeader := make(mail.Header, len(header))
 
 	for headerName, headerData := range header {
 
-		parsedHeaderData := []string{}
+		parsedHeaderData := make([]string, 0, len(headerData))
 		for _, headerValue := range headerData {
-			parsedHeaderData = append(parsedHeaderData, decodeMimeSentence(headerValue))
+			decodedHeader, err := parser.decodeMimeSentence(headerValue)
+			if err != nil {
+				return nil, err
+			}
+			parsedHeaderData = append(parsedHeaderData, decodedHeader)
 		}
 
 		parsedHeader[headerName] = parsedHeaderData
 	}
 
-	return mail.Header(parsedHeader), nil
+	return parsedHeader, nil
 }
 
 func isEmbeddedFile(part *Part) bool {
 	return part.contentTransferEncoding != ""
 }
 
-func decodeEmbeddedFile(part *Part) (ef EmbeddedFile, err error) {
-	cid := decodeMimeSentence(part.Header.Get("Content-Id"))
+func (parser mailParser) decodeEmbeddedFile(part *Part) (ef EmbeddedFile, err error) {
+	cid, err := parser.decodeMimeSentence(part.Header.Get("Content-Id"))
+	if err != nil {
+		return
+	}
 	decoded, err := decodeContent(part, part.contentTransferEncoding)
 	if err != nil {
 		return
@@ -475,7 +525,10 @@ func decodeEmbeddedFile(part *Part) (ef EmbeddedFile, err error) {
 
 	if name, ok := part.contentTypeParams["name"]; ok {
 		name = filepath.Base(name)
-		ef.Filename = decodeMimeSentence(name)
+		ef.Filename, err = parser.decodeMimeSentence(name)
+		if err != nil {
+			return
+		}
 	}
 
 	return
@@ -485,11 +538,17 @@ func isAttachment(part *Part) bool {
 	return part.FileName() != "" || strings.ToLower(part.contentDisposition) == "attachment"
 }
 
-func decodeAttachment(part *Part) (at Attachment, err error) {
-	filename := decodeMimeSentence(part.FileName())
+func (parser mailParser) decodeAttachment(part *Part) (at Attachment, err error) {
+	filename, err := parser.decodeMimeSentence(part.FileName())
+	if err != nil {
+		return
+	}
 	if filename == "" {
 		if name, ok := part.contentTypeParams["name"]; ok {
-			filename = decodeMimeSentence(name)
+			filename, err = parser.decodeMimeSentence(name)
+			if err != nil {
+				return
+			}
 		}
 	}
 	decoded, err := decodeContent(part, part.Header.Get("Content-Transfer-Encoding"))
@@ -538,7 +597,7 @@ func decodeContent(content io.Reader, encoding string) (io.Reader, error) {
 
 		return bytes.NewReader(decoded), nil
 	case "7bit", "8bit", "":
-		dd, err := ioutil.ReadAll(content)
+		dd, err := io.ReadAll(content)
 		if err != nil {
 			return nil, err
 		}
@@ -550,8 +609,18 @@ func decodeContent(content io.Reader, encoding string) (io.Reader, error) {
 }
 
 type headerParser struct {
+	parser mailParser
 	header *mail.Header
 	err    error
+}
+
+func (hp *headerParser) parseHeader(s string) (result string) {
+	if hp.err != nil {
+		return ""
+	}
+
+	result, hp.err = hp.parser.decodeMimeSentence(s)
+	return result
 }
 
 func (hp *headerParser) parseAddress(s string) (ma *mail.Address) {
@@ -560,7 +629,10 @@ func (hp *headerParser) parseAddress(s string) (ma *mail.Address) {
 	}
 
 	if strings.Trim(s, " \n") != "" {
-		ma, hp.err = mail.ParseAddress(s)
+		ma, hp.err = hp.parser.address.Parse(s)
+		if hp.parser.decodeQuotedNames {
+			hp.decodeAddressName(ma)
+		}
 
 		return ma
 	}
@@ -574,8 +646,45 @@ func (hp *headerParser) parseAddressList(s string) (ma []*mail.Address) {
 	}
 
 	if strings.Trim(s, " \n") != "" {
-		ma, hp.err = mail.ParseAddressList(s)
+		ma, hp.err = hp.parser.address.ParseList(s)
+		if hp.parser.decodeQuotedNames {
+			hp.decodeAddressNames(ma)
+		}
 		return
+	}
+
+	return
+}
+
+func (hp *headerParser) decodeAddressName(addr *mail.Address) {
+	if addr == nil || hp.err != nil {
+		return
+	}
+	newName, decodeErr := hp.parser.word.Decode(addr.Name)
+	if decodeErr == nil {
+		addr.Name = newName
+	} else if !strings.Contains(decodeErr.Error(), "mime: invalid RFC 2047 encoded-word") { // !errors.Is(decodeErr, mime.errInvalidWord) {
+		hp.err = decodeErr
+	}
+}
+
+func (hp *headerParser) decodeAddressNames(list []*mail.Address) {
+	if hp.err != nil {
+		return
+	}
+	for _, addr := range list {
+		hp.decodeAddressName(addr)
+	}
+}
+
+func (hp *headerParser) parseAddressValues(s []string) (ma []*mail.Address) {
+	for _, s := range s {
+		var result *mail.Address
+		result = hp.parseAddress(s)
+		if hp.err != nil {
+			return
+		}
+		ma = append(ma, result)
 	}
 
 	return
@@ -587,10 +696,20 @@ func (hp *headerParser) parseTime(s string) (t time.Time) {
 	}
 
 	formats := []string{
+		time.RFC1123,
 		time.RFC1123Z,
 		"Mon, 2 Jan 2006 15:04:05 -0700",
 		time.RFC1123Z + " (MST)",
 		"Mon, 2 Jan 2006 15:04:05 -0700 (MST)",
+		time.RFC1123Z + " (GMT-07:00)",               // include additional tz
+		"Mon, 2 Jan 2006 15:04:05 -0700 (GMT-07:00)", // include additional tz
+		time.RFC1123[5:],                             // omit dow
+		time.RFC1123Z[5:],                            // omit dow
+		"2 Jan 2006 15:04:05 -0700",
+		time.RFC1123Z[5:] + " (MST)", // omit dow
+		"2 Jan 2006 15:04:05 -0700 (MST)",
+		time.RFC1123Z[5:] + " (GMT-07:00)",      // include additional tz and omit dow
+		"2 Jan 2006 15:04:05 -0700 (GMT-07:00)", // include additional tz
 	}
 
 	for _, format := range formats {
@@ -644,17 +763,18 @@ type EmbeddedFile struct {
 type Email struct {
 	Header mail.Header
 
-	Subject    string
-	Sender     *mail.Address
-	From       []*mail.Address
-	ReplyTo    []*mail.Address
-	To         []*mail.Address
-	Cc         []*mail.Address
-	Bcc        []*mail.Address
-	Date       time.Time
-	MessageID  string
-	InReplyTo  []string
-	References []string
+	Subject     string
+	Sender      *mail.Address
+	From        []*mail.Address
+	ReplyTo     []*mail.Address
+	To          []*mail.Address
+	Cc          []*mail.Address
+	Bcc         []*mail.Address
+	DeliveredTo []*mail.Address
+	Date        time.Time
+	MessageID   string
+	InReplyTo   []string
+	References  []string
 
 	ResentFrom      []*mail.Address
 	ResentSender    *mail.Address
